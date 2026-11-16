@@ -1,33 +1,45 @@
-import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+// main.ts — "The Ocean Has a Door" entry for ai-excited-01.
+// Copies the repo-held entry.png to the output directory, verifying
+// the image is a whole PNG or JPEG and that the copy is byte-identical.
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Entry for make.fun "Make the AI judge excited" (ai-excited-01).
-// The image is "The Ocean Has a Door": a tiny red lighthouse whose beam
-// parts the midnight ocean onto an upside-down ocean with an ivory moon
-// and luminous whales. This program copies the image the repository
-// holds to the output directory. No network, deterministic output.
+const MAX_BYTES = 1048576;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-const here = dirname(fileURLToPath(import.meta.url));
+const repoDir = dirname(fileURLToPath(import.meta.url));
+const source = join(repoDir, "entry.png");
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
-const source = join(here, "entry.png");
 const target = join(outDir, "entry.png");
 
-// Fail loudly instead of writing a partial or wrong file: the source
-// must exist and be a complete JPEG (SOI marker at the start, EOI at
-// the end) before anything is copied.
-const bytes = readFileSync(source);
-if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
-  throw new Error("entry.png is not a JPEG image");
+if (!existsSync(source)) {
+  throw new Error(`entry.png not found at ${source}`);
 }
-if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
-  throw new Error("entry.png is truncated: missing JPEG end marker");
+
+const bytes = readFileSync(source);
+if (bytes.length === 0 || bytes.length > MAX_BYTES) {
+  throw new Error(`entry.png is ${bytes.length} bytes; must be 1..${MAX_BYTES}`);
+}
+
+const isPng = bytes.subarray(0, 8).equals(PNG_SIGNATURE);
+const isJpeg =
+  bytes.length >= 4 &&
+  bytes[0] === 0xff &&
+  bytes[1] === 0xd8 &&
+  bytes[bytes.length - 2] === 0xff &&
+  bytes[bytes.length - 1] === 0xd9;
+if (!isPng && !isJpeg) {
+  throw new Error("entry.png is neither a whole PNG nor a whole JPEG");
 }
 
 mkdirSync(outDir, { recursive: true });
 copyFileSync(source, target);
 
-// Verify the copy landed whole: same byte length as the source.
-if (statSync(target).size !== bytes.length) {
-  throw new Error("output is not byte-identical to entry.png");
+const copied = readFileSync(target);
+const sha = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
+if (copied.length !== bytes.length || sha(copied) !== sha(bytes)) {
+  throw new Error("copied entry.png differs from the source");
 }
+console.log(`wrote ${target} (${copied.length} bytes, sha256 ${sha(copied)})`);
