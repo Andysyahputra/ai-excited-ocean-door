@@ -1,99 +1,97 @@
-// "The Ocean Has a Door" — make.fun ai-excited-01 entry.
+// The Ocean Has a Door — make.fun ai-excited-01
 //
-// The image is the artwork itself: a colossal midnight ocean split open
-// like two curtains by the beam of a tiny red lighthouse, revealing a
-// second, upside-down ocean with a pale moon beneath the waves and
-// luminous whales swimming upward into it. It was produced from the
-// design spec (SPEC-sol.md) with an image generator and selected for
-// clean geometry, legible silhouettes and no stray text, so this program
-// ships the finished image as-is and copies it byte-for-byte to the
-// output path. Deterministic: the same bytes in, the same bytes out.
-//
-// Before copying, the program validates the file against the
-// competition gate: at most 1 MiB, at most 1024x1024 pixels, and a whole
-// JPEG (starts with SOI, ends with EOI, dimensions read from its SOF
-// segment). After copying it verifies the destination byte-for-byte
-// with a SHA-256 comparison, so a truncated or corrupted write fails
-// loudly instead of silently submitting a broken image.
-//
-// Node 22, standard library only. No network, no randomness.
+// Copies the entry image (a JPEG held in this repository as entry.png)
+// to $MAKEFUN_OUTPUT_DIR/entry.png (default /output/entry.png).
+// Before copying, the image is validated against the competition gate:
+//   - JPEG magic bytes (FF D8 FF) and terminating EOI marker (FF D9)
+//   - at most 1 MiB (1,048,576 bytes)
+//   - at most 1024 x 1024 pixels (dimensions read from the SOF marker)
+// After copying, the output file is re-read and its size and sha256 are
+// compared with the source, so a partial or corrupted write is caught
+// instead of silently passing. The copy is byte-for-byte, so repeated
+// runs are deterministic.
+
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 
-const SOURCE_NAME = "entry.png";
-const MAX_BYTES = 1048576; // 1 MiB gate limit
-const MAX_DIMENSION = 1024; // gate limit per side
+const MAX_BYTES = 1_048_576;
+const MAX_DIMENSION = 1024;
 
-// Source image lives next to this program in the repository.
-const repoDir = dirname(fileURLToPath(import.meta.url));
-const sourcePath = join(repoDir, SOURCE_NAME);
+const repoRoot = new URL(".", import.meta.url).pathname;
+const sourcePath = resolve(repoRoot, "entry.png");
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR?.trim() || "/output";
+const outputPath = join(outputDir, "entry.png");
 
-// Destination: $MAKEFUN_OUTPUT_DIR/entry.png, default /output/entry.png.
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-const outputPath = resolve(outputDir, SOURCE_NAME);
-
-if (!existsSync(sourcePath)) {
-  throw new Error(`source image missing: ${sourcePath}`);
+function fail(message: string): never {
+  console.error(`error: ${message}`);
+  process.exit(1);
 }
 
-const bytes = readFileSync(sourcePath);
-if (bytes.length === 0 || bytes.length > MAX_BYTES) {
-  throw new Error(`source image size ${bytes.length} bytes is outside the 1..1048576 range`);
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
-// Whole-JPEG check: SOI marker at the start, EOI marker at the end.
-if (bytes[0] !== 0xff || bytes[1] !== 0xd8) {
-  throw new Error("source image is not a JPEG (missing SOI marker FFD8)");
-}
-if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
-  throw new Error("source image is not a whole JPEG (missing EOI marker FFD9)");
-}
-
-// Read width/height from the first SOF0/SOF2 segment and enforce the
-// 1024x1024 gate. Walk the JPEG markers; skip segments we do not need.
-function jpegDimensions(buf) {
-  let offset = 2; // past SOI
-  while (offset + 9 < buf.length) {
-    if (buf[offset] !== 0xff) {
-      throw new Error(`corrupt JPEG marker at offset ${offset}`);
-    }
-    const marker = buf[offset + 1];
-    // Standalone markers carry no length field.
-    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+// Read the SOF segment of a JPEG and return its [width, height].
+// JPEG markers: 0xFF 0xC0..0xCF (except 0xC4, 0xC8, 0xCC) hold the frame header.
+function jpegDimensions(bytes: Buffer): [number, number] {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+    fail("entry.png is not a JPEG (missing SOI marker FF D8 FF)");
+  }
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) fail("entry.png is malformed: expected a JPEG marker");
+    const marker = bytes[offset + 1];
+    // Standalone markers have no length field; skip them.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
       offset += 2;
       continue;
     }
-    const length = buf.readUInt16BE(offset + 2);
-    if (length < 2 || offset + 2 + length > buf.length) {
-      throw new Error(`corrupt JPEG segment at offset ${offset}`);
+    const length = bytes.readUInt16BE(offset + 2);
+    if (length < 2 || offset + 2 + length > bytes.length) {
+      fail("entry.png is malformed: bad JPEG segment length");
     }
-    // SOF0 (0xC0) / SOF2 (0xC2): precision byte, then height, then width.
-    if (marker === 0xc0 || marker === 0xc2) {
-      const height = buf.readUInt16BE(offset + 5);
-      const width = buf.readUInt16BE(offset + 7);
-      return { width, height };
+    const isSof =
+      (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc);
+    if (isSof) {
+      const height = bytes.readUInt16BE(offset + 5);
+      const width = bytes.readUInt16BE(offset + 7);
+      return [width, height];
     }
     offset += 2 + length;
   }
-  throw new Error("no SOF segment found in JPEG");
+  fail("entry.png is malformed: no JPEG SOF segment found");
 }
 
-const { width, height } = jpegDimensions(bytes);
-if (width === 0 || height === 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
-  throw new Error(`image dimensions ${width}x${height} exceed the 1024x1024 gate`);
+if (!existsSync(sourcePath)) fail(`source image not found: ${sourcePath}`);
+
+const bytes = readFileSync(sourcePath);
+const size = statSync(sourcePath).size;
+
+if (size > MAX_BYTES) {
+  fail(`entry.png is ${size} bytes, over the 1 MiB limit`);
+}
+if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
+  fail("entry.png is truncated: missing JPEG end marker FF D9");
+}
+const [width, height] = jpegDimensions(bytes);
+if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+  fail(`entry.png is ${width}x${height}, over the 1024x1024 limit`);
 }
 
+const sourceDigest = sha256(bytes);
 mkdirSync(outputDir, { recursive: true });
-copyFileSync(sourcePath, outputPath);
-
-// Byte-for-byte verification: SHA-256 of destination must equal source.
-const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
-const sourceHash = sha256(bytes);
-const writtenHash = sha256(readFileSync(outputPath));
-if (writtenHash !== sourceHash) {
-  throw new Error(`copy mismatch: sha256 ${writtenHash}, expected ${sourceHash}`);
+if (resolve(outputPath) !== resolve(sourcePath)) {
+  copyFileSync(sourcePath, outputPath);
 }
 
-console.log(`wrote ${outputPath} (${bytes.length} bytes, ${width}x${height}, sha256 ${sourceHash})`);
+// Verify the written output matches the validated source byte for byte.
+const written = readFileSync(outputPath);
+if (written.length !== size) {
+  fail(`output is ${written.length} bytes, expected ${size}: incomplete write`);
+}
+if (sha256(written) !== sourceDigest) {
+  fail("output sha256 does not match source: corrupted write");
+}
+
+console.log(`copied entry.png (${size} bytes, ${width}x${height}, sha256 ${sourceDigest}) -> ${outputPath} (verified)`);
